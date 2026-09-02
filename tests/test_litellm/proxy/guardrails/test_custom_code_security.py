@@ -228,3 +228,43 @@ def test_augmented_assignment_works():
 def test_missing_apply_guardrail_raises():
     with pytest.raises(CustomCodeCompilationError, match="apply_guardrail"):
         _compile("x = 1\n")
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        # Every one of these compiles fine and then raises
+        # "NameError: name '_unpack_sequence_' is not defined" at call time when
+        # the guard is missing from the sandbox globals.
+        ("    a, b = inputs['pair']\n    return a + b\n", 3),
+        ("    a, (b, c) = inputs['nested']\n    return a + b + c\n", 6),
+        ("    a, *rest = inputs['seq']\n    return rest\n", [2, 3]),
+        ("    with inputs['ctx'] as (a, b):\n        return a + b\n", 15),
+    ],
+)
+def test_tuple_unpacking_runs(body: str, expected):
+    """Ordinary tuple unpacking must work inside a guardrail, not NameError."""
+
+    class _Ctx:
+        def __enter__(self):
+            return (7, 8)
+
+        def __exit__(self, *args):
+            return False
+
+    guardrail = _compile("def apply_guardrail(inputs, request_data, input_type):\n" + body)
+    fn = guardrail._compiled_function
+    assert fn is not None
+    inputs = {"pair": (1, 2), "nested": (1, (2, 3)), "seq": [1, 2, 3], "ctx": _Ctx()}
+    assert fn(inputs, {}, "request") == expected
+
+
+def test_unpack_sequence_guard_is_wired_in():
+    """The guard RestrictedPython emits for unpacking targets must be provided."""
+    from RestrictedPython.Guards import guarded_unpack_sequence
+
+    from litellm.proxy.guardrails.guardrail_hooks.custom_code.sandbox import (
+        build_sandbox_globals,
+    )
+
+    assert build_sandbox_globals()["_unpack_sequence_"] is guarded_unpack_sequence
